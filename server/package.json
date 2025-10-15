@@ -7,9 +7,13 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "pg": "^8.11.5",
+    "serverless-http": "^3.2.0",
     "uuid": "^9.0.1"
   },
   "scripts": {
-    "start": "node index.js"
+    "dev": "node server/index.js",
+    "start": "node server/index.js",
+    "vercel": "node api/index.js"
   }
 }

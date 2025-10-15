@@ -19,20 +19,11 @@ import macrosRouter from '../server/routes/macros.js';
 
 const app = express();
 
-// Note: On Vercel this API is same-origin with your frontend.
-// You can allow same-origin and localhost (for previews if needed).
+// Same-origin on Vercel; allow localhost for previews
 app.use(
   cors({
     origin: (origin, cb) => {
-      const allowed = [
-        // same-origin calls may send no Origin; allow them
-        undefined,
-        null,
-        '',
-        'https://reactbackupwithsupa.vercel.app',
-        'http://localhost:5173',
-        'http://127.0.0.1:5173',
-      ];
+      const allowed = [undefined, null, '', 'https://reactbackupwithsupa.vercel.app', 'http://localhost:5173', 'http://127.0.0.1:5173'];
       if (allowed.includes(origin)) return cb(null, true);
       return cb(new Error('Not allowed by CORS'));
     },
@@ -43,17 +34,14 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
-// Auth routes (mounted under /api/internal in your client)
+// Auth routes live under /api/internal/*
 app.use('/internal', internalAuthRouter);
 
-// Tiny guard (same as your server/index.js, adjusted for our base path)
+// Tiny guard to protect data routes
 app.use((req, res, next) => {
-  // these are the unprotected endpoints
   if (req.path.startsWith('/internal/login')) return next();
   if (req.path.startsWith('/internal/session')) return next();
   if (req.path.startsWith('/internal/logout')) return next();
-
-  // protect the rest under /internal/*
   if (!req.path.startsWith('/internal')) return next();
 
   const raw = req.cookies?.int;
@@ -66,7 +54,7 @@ app.use((req, res, next) => {
   }
 });
 
-// Data routes (same routers)
+// Data routes
 app.use('/internal', ticketsRouter);
 app.use('/internal/users', usersRouter);
 app.use('/internal/views', viewsRouter);
@@ -78,7 +66,7 @@ app.use('/internal/macros', macrosRouter);
 // Health
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
-// Optional: light DB ping on cold start (won't crash function)
+// Try a light DB ping on cold start (won’t crash the function)
 (async () => {
   try {
     await pool.query('select 1');
@@ -88,8 +76,5 @@ app.get('/healthz', (_req, res) => res.json({ ok: true }));
   }
 })();
 
-// Tell Vercel not to parse body itself (Express handles it)
 export const config = { api: { bodyParser: false } };
-
-// Export serverless handler
 export default serverless(app);
