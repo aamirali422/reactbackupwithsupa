@@ -1,0 +1,28 @@
+name: Zendesk → Supabase backup (daily)
+
+on:
+  schedule:
+    - cron: "0 2 * * *"   # runs daily at 02:00 UTC
+  workflow_dispatch: {}    # allow manual runs from the Actions tab
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run backup
+        env:
+          ZENDESK_SUBDOMAIN: ${{ secrets.ZENDESK_SUBDOMAIN }}
+          ZENDESK_EMAIL: ${{ secrets.ZENDESK_EMAIL }}
+          ZENDESK_API_TOKEN: ${{ secrets.ZENDESK_API_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DOWNLOAD_ATTACHMENTS: "false"
+          ZENDESK_PER_PAGE: "200"
+          ZENDESK_EXCLUDE_DELETED: "true"
+        run: python backup.py
