@@ -1,18 +1,11 @@
 {
   "version": 2,
-  "framework": "vite",
-  "buildCommand": "npm run build",
-  "outputDirectory": "dist",
-
-  "functions": {
-    "api/**/*.js": {
-      "runtime": "nodejs20.x",
-      "maxDuration": 60
-    }
-  },
-
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/$1" },
-    { "source": "/(.*)", "destination": "/index.html" }
+  "builds": [
+    { "src": "api/**/*.js", "use": "@vercel/node@2" },
+    { "src": "package.json", "use": "@vercel/static-build@1", "config": { "distDir": "dist" } }
+  ],
+  "routes": [
+    { "src": "/api/(.*)", "dest": "/api/$1" },
+    { "src": "/(.*)", "dest": "/index.html" }
   ]
 }

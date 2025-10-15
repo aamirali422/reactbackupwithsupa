@@ -1,4 +1,3 @@
-// api/index.js
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -17,7 +16,6 @@ import macrosRouter from '../server/routes/macros.js';
 
 const app = express();
 
-// Same-origin on Vercel; allow localhost for previews
 app.use(
   cors({
     origin: (origin, cb) => {
@@ -25,19 +23,18 @@ app.use(
       if (allowed.includes(origin)) return cb(null, true);
       return cb(new Error('Not allowed by CORS'));
     },
-    credentials: true,
+    credentials: true
   })
 );
-
 app.use(express.json());
 app.use(cookieParser());
 
-// ---- Routes (mounted WITHOUT the /api prefix) ----
+// auth endpoints (unprotected)
 app.use('/internal', internalAuthRouter);
 
-// Tiny guard (protect /internal/* except login/session/logout)
+// tiny guard for other internal routes
 app.use((req, res, next) => {
-  const p = req.path; // serverless-http will normalize for us with basePath
+  const p = req.path;
   if (p.startsWith('/internal/login')) return next();
   if (p.startsWith('/internal/session')) return next();
   if (p.startsWith('/internal/logout')) return next();
@@ -53,6 +50,7 @@ app.use((req, res, next) => {
   }
 });
 
+// data routes
 app.use('/internal', ticketsRouter);
 app.use('/internal/users', usersRouter);
 app.use('/internal/views', viewsRouter);
@@ -61,16 +59,13 @@ app.use('/internal/trigger-categories', triggerCategoriesRouter);
 app.use('/internal/organizations', organizationsRouter);
 app.use('/internal/macros', macrosRouter);
 
-// Health
+// health (inside express app too)
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
-// Optional ping
+// Optional PG ping (won't crash the function)
 (async () => {
   try { await pool.query('select 1'); console.log('✅ Postgres connected (serverless)'); }
   catch (e) { console.error('❌ Postgres connection error (serverless):', e.message); }
 })();
 
-export const config = { api: { bodyParser: false } };
-
-// 👉 The important part: tell serverless-http our base path on Vercel is /api
 export default serverless(app, { basePath: '/api' });
