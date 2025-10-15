@@ -40,11 +40,12 @@ app.use(
       const allowed = [
         process.env.FRONTEND_ORIGIN || "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://reactbackupwithsupa.vercel.app", // ✅ add this
       ];
       if (!origin || allowed.includes(origin)) return cb(null, true);
       return cb(new Error("Not allowed by CORS"));
     },
-    credentials: true,
+    credentials: true, // ✅ keep cookies
   })
 );
 app.use(express.json());
