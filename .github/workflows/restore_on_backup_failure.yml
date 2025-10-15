@@ -1,0 +1,72 @@
+name: Restore from raw_snapshots on backup failure
+
+on:
+  workflow_run:
+    workflows: ["Zendesk → Supabase backup (daily)"]
+    types: [completed]
+  workflow_dispatch:  # allow manual restore
+    inputs:
+      scope:
+        description: "Scopes to restore (comma separated or 'all')"
+        required: false
+        default: "all"
+      truncate_first:
+        description: "TRUNCATE target tables before restore?"
+        required: false
+        default: "false"
+      limit:
+        description: "Limit number of raw rows per resource (blank = all)"
+        required: false
+        default: ""
+
+jobs:
+  maybe-restore:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compute args
+        id: args
+        run: |
+          # Default args for workflow_run (auto), or use inputs for manual dispatch
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SCOPE="${{ github.event.inputs.scope }}"
+            TRUNC="${{ github.event.inputs.truncate_first }}"
+            LIMIT="${{ github.event.inputs.limit }}"
+          else
+            SCOPE="all"
+            TRUNC="false"
+            LIMIT=""
+          fi
+
+          printf "scope=%s\n" "$SCOPE" >> "$GITHUB_OUTPUT"
+          printf "truncate=%s\n" "$TRUNC" >> "$GITHUB_OUTPUT"
+          printf "limit=%s\n" "$LIMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Run restore
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          ARGS="--scope ${{ steps.args.outputs.scope }}"
+          if [ "${{ steps.args.outputs.truncate }}" = "true" ]; then
+            ARGS="$ARGS --truncate-first"
+          fi
+          if [ -n "${{ steps.args.outputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ steps.args.outputs.limit }}"
+          fi
+          echo "restore.py $ARGS"
+          python restore.py $ARGS
