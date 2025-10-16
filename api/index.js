@@ -200,9 +200,9 @@ app.get('/api/internal/tickets', async (req, res) => {
     console.log('GET /api/internal/tickets ->', rows.length, 'rows');
     res.json({ rows, limit });
   } catch (err) {
-    console.error('GET /api/internal/tickets error:', err);
-    res.status(500).json({ error: 'DB query failed' });
-  }
+  console.error('GET /api/internal/tickets error:', err);
+  res.status(500).json({ error: 'DB query failed', detail: String(err?.message || err) });
+}
 });
 
 app.get('/api/internal/tickets/:id', async (req, res) => {
@@ -256,9 +256,9 @@ app.get('/api/internal/tickets/:id', async (req, res) => {
 
     res.json({ ticket: tRs.rows[0], comments, attachments });
   } catch (err) {
-    console.error('GET /api/internal/tickets/:id error:', err);
-    res.status(500).json({ error: 'DB query failed' });
-  }
+  console.error('GET /api/internal/tickets error:', err);
+  res.status(500).json({ error: 'DB query failed', detail: String(err?.message || err) });
+}
 });
 
 app.get('/api/internal/tickets/:id/attachments', async (req, res) => {
@@ -278,10 +278,10 @@ app.get('/api/internal/tickets/:id/attachments', async (req, res) => {
       )
     ).rows;
     res.json({ rows });
-  } catch (err) {
-    console.error('GET /api/internal/tickets/:id/attachments error:', err);
-    res.status(500).json({ error: 'DB query failed' });
-  }
+ } catch (err) {
+  console.error('GET /api/internal/tickets error:', err);
+  res.status(500).json({ error: 'DB query failed', detail: String(err?.message || err) });
+}
 });
 
 // ---- USERS ---------------------------------------------------
@@ -310,6 +310,45 @@ app.get('/api/internal/users', async (req, res) => {
     res.json({ rows, limit });
   } catch (e) {
     console.error('GET /api/internal/users error:', e);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+// ---- MACROS --------------------------------------------------
+app.get('/api/internal/macros', async (req, res) => {
+  try {
+    const search = (req.query.q || '').toString().trim().toLowerCase();
+    const active = (req.query.active || '').toString().trim();
+    const L = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+    const O = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const where = [];
+    const params = [];
+    let i = 1;
+
+    if (search) {
+      where.push(`LOWER(title) LIKE $${i++}`);
+      params.push(`%${search}%`);
+    }
+    if (active) {
+      where.push(`active = $${i++}`);
+      params.push(active === 'true');
+    }
+
+    const sql = `
+      SELECT id, title, description, active, position, default_macro,
+             created_at, updated_at
+      FROM macros
+      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      ORDER BY position ASC NULLS LAST, updated_at DESC NULLS LAST
+      LIMIT ${L} OFFSET ${O}
+    `;
+
+    const { rows } = await q(sql, params);
+    console.log('GET /api/internal/macros ->', rows.length, 'rows');
+    res.json({ rows, limit: L, offset: O });
+  } catch (err) {
+    console.error('macros.list error:', err);
     res.status(500).json({ error: 'DB error' });
   }
 });
