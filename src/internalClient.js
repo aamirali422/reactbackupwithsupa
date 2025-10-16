@@ -1,68 +1,71 @@
 // src/lib/internalClient.js
 
-// --- Decide API base ----------------------------------------------------------
-let BASE;
+// --- Decide API base (env-first, with safe fallbacks) ------------------------
+const RAW_BASE =
+  // Optional runtime override for debugging
+  (typeof window !== "undefined" && window.__API_BASE__) ??
+  // Preferred: provided by Vite / Vercel envs
+  import.meta.env.VITE_API_BASE ??
+  // Fallback: same-origin /api (works on Vercel)
+  "/api";
 
-// Allow a manual override if you ever set it (optional)
-if (window.__API_BASE__) {
-  BASE = String(window.__API_BASE__).trim().replace(/\/+$/, '');
-} else if (import.meta.env.DEV) {
-  // DEV: always talk to the Node API directly
-  BASE = 'http://localhost:4000/api';
-} else {
-  // PROD (Vercel): same origin /api
-  BASE = '/api';
-}
+const BASE = String(RAW_BASE).trim().replace(/\/+$/, "");
 
-if (!window.__API_BASE_LOGGED__) {
-  console.log('[internalClient] API BASE =', BASE);
+if (typeof window !== "undefined" && !window.__API_BASE_LOGGED__) {
+  console.log("[internalClient] API BASE =", BASE);
   window.__API_BASE_LOGGED__ = true;
 }
 
 function joinUrl(base, path) {
-  const left = base.endsWith('/') ? base.slice(0, -1) : base;
-  const right = path.startsWith('/') ? path : `/${path}`;
+  const left = base.endsWith("/") ? base.slice(0, -1) : base;
+  const right = path.startsWith("/") ? path : `/${path}`;
   return `${left}${right}`;
 }
 
-// --- Core request helper ------------------------------------------------------
+// --- Core request helper -----------------------------------------------------
 async function request(path, opts = {}) {
   const url = joinUrl(BASE, path);
   const res = await fetch(url, {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
     ...opts,
   });
 
   const text = await res.text();
   let data;
-  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
 
   if (!res.ok) {
-    const detail = typeof data === 'object' && data?.error ? `: ${data.error}` : '';
-    throw new Error(`HTTP ${res.status}${detail} ${typeof data === 'string' ? data : ''}`.trim());
+    const detail = typeof data === "object" && data?.error ? `: ${data.error}` : "";
+    throw new Error(
+      `HTTP ${res.status}${detail} ${typeof data === "string" ? data : ""}`.trim()
+    );
   }
   return data;
 }
 
 /* ============ AUTH ============ */
 export function loginInternal({ email, password }) {
-  return request('/internal/login', {
-    method: 'POST',
+  return request("/internal/login", {
+    method: "POST",
     body: JSON.stringify({ email, password }),
   });
 }
 export function getInternalSession() {
-  return request('/internal/session');
+  return request("/internal/session");
 }
 export function logoutInternal() {
-  return request('/internal/logout', { method: 'POST' });
+  return request("/internal/logout", { method: "POST" });
 }
 
 /* ============ TICKETS ============ */
 export function listTickets(params = {}) {
   const qs = new URLSearchParams(params).toString();
-  return request(`/internal/tickets${qs ? `?${qs}` : ''}`);
+  return request(`/internal/tickets${qs ? `?${qs}` : ""}`);
 }
 export const getTicket = (id) => request(`/internal/tickets/${encodeURIComponent(id)}`);
 export const listTicketAttachments = (id) =>
@@ -71,35 +74,36 @@ export const listTicketAttachments = (id) =>
 /* ============ USERS ============ */
 export function listUsers(params = {}) {
   const qs = new URLSearchParams(params).toString();
-  return request(`/internal/users${qs ? `?${qs}` : ''}`);
+  return request(`/internal/users${qs ? `?${qs}` : ""}`);
 }
 
 /* ============ ORGANIZATIONS ============ */
 export function listOrganizations(params = {}) {
   const qs = new URLSearchParams(params).toString();
-  return request(`/internal/organizations${qs ? `?${qs}` : ''}`);
+  return request(`/internal/organizations${qs ? `?${qs}` : ""}`);
 }
 
 /* ============ VIEWS ============ */
 export function listViews(params = {}) {
   const qs = new URLSearchParams(params).toString();
-  return request(`/internal/views${qs ? `?${qs}` : ''}`);
+  return request(`/internal/views${qs ? `?${qs}` : ""}`);
 }
 
 /* ============ TRIGGERS & CATEGORIES ============ */
 export function listTriggers(params = {}) {
   const qs = new URLSearchParams(params).toString();
-  return request(`/internal/triggers${qs ? `?${qs}` : ''}`);
+  return request(`/internal/triggers${qs ? `?${qs}` : ""}`);
 }
 export function listTriggerCategories(params = {}) {
   const qs = new URLSearchParams(params).toString();
-  return request(`/internal/trigger-categories${qs ? `?${qs}` : ''}`);
+  return request(`/internal/trigger-categories${qs ? `?${qs}` : ""}`);
 }
 
 /* ============ MACROS ============ */
 export function listMacros(params = {}) {
   const qs = new URLSearchParams(params).toString();
-  return request(`/internal/macros${qs ? `?${qs}` : ''}`);
+  return request(`/internal/macros${qs ? `?${qs}` : ""}`);
 }
 
+// Exported for debugging in the app
 export const apiBase = BASE;
