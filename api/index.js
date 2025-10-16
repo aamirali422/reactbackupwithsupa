@@ -7,6 +7,11 @@ import serverless from 'serverless-http';
 import pg from 'pg';
 
 // ===================================================
+//  Global flags
+// ===================================================
+const isProd = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
+
+// ===================================================
 //  DB (self-signed SSL fix + pool)
 // ===================================================
 process.env.NODE_TLS_REJECT_UNAUTHORIZED =
@@ -36,23 +41,26 @@ const q = (text, params) => pool.query(text, params);
 // ===================================================
 const app = express();
 
+const ALLOWED_ORIGINS = [
+  process.env.FRONTEND_ORIGIN,                 // prod origin on Vercel
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+].filter(Boolean);
+
+const norm = (s) => String(s || '').replace(/\/+$/, '');
+
 app.use(
   cors({
     origin: (origin, cb) => {
-      const allowed = new Set([
-        process.env.FRONTEND_ORIGIN || 'http://localhost:5173',
-        'http://127.0.0.1:5173',
-        'https://reactbackupwithsupa.vercel.app',
-        undefined, null, ''
-      ]);
-      if (allowed.has(origin)) return cb(null, true);
-      return cb(new Error('Not allowed by CORS'));
+      if (!isProd) return cb(null, true); // allow all in dev
+      if (!origin) return cb(null, true); // same-origin or curl
+      const ok = ALLOWED_ORIGINS.some((o) => norm(origin) === norm(o));
+      return cb(ok ? null : new Error(`CORS blocked: ${origin}`), ok);
     },
     credentials: true,
   })
 );
 
-// Important: put JSON parser BEFORE routes
 app.use(express.json());
 app.use(cookieParser());
 
@@ -63,9 +71,7 @@ app.get('/api/healthz', (_req, res) => res.json({ ok: true }));
 //  Cookie helpers (for internal admin auth)
 // ===================================================
 const COOKIE_NAME = 'int';
-const isProd = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
 
-// robust base64url (some Node versions are picky)
 function base64urlEncode(str) {
   return Buffer.from(str, 'utf8')
     .toString('base64')
@@ -106,7 +112,6 @@ const INTERNAL_USER = {
   name: 'Internal Admin',
 };
 
-// Log incoming auth requests for debugging (method, path only)
 app.use((req, _res, next) => {
   if (req.path.startsWith('/api/internal'))
     console.log(`[INT] ${req.method} ${req.path}`);
@@ -115,17 +120,10 @@ app.use((req, _res, next) => {
 
 app.post('/api/internal/login', (req, res, next) => {
   try {
-    if (!req.is('application/json')) {
-      // Some proxies mis-set headers; try to parse raw text as JSON
-      if (typeof req.body !== 'object') {
-        return res.status(400).json({ error: 'Expected JSON body' });
-      }
-    }
     const { email, password } = req.body || {};
     if (!email || !password) {
       return res.status(400).json({ error: 'email and password required' });
     }
-
     if (email === INTERNAL_USER.email && password === INTERNAL_USER.password) {
       const session = { user: { email, name: INTERNAL_USER.name } };
       setSessionCookie(res, session);
@@ -171,8 +169,7 @@ app.use((req, res, next) => {
 });
 
 // ===================================================
-//  Data Routes (single-file)
-//  All mounted under /api/internal/*
+//  Data Routes (single-file) under /api/internal/*
 // ===================================================
 
 // ---- TICKETS -------------------------------------------------
@@ -453,46 +450,8 @@ app.get('/api/internal/trigger-categories', async (req, res) => {
   }
 });
 
-// ---- MACROS --------------------------------------------------
-app.get('/api/internal/macros', async (req, res) => {
-  try {
-    const search = (req.query.q || '').toString().trim().toLowerCase();
-    const active = (req.query.active || '').toString().trim();
-    const L = Math.min(parseInt(req.query.limit, 10) || 100, 500);
-    const O = Math.max(parseInt(req.query.offset, 10) || 0, 0);
-
-    const where = [];
-    const params = [];
-    let i = 1;
-
-    if (search) {
-      where.push(`LOWER(title) LIKE $${i++}`);
-      params.push(`%${search}%`);
-    }
-    if (active) {
-      where.push(`active = $${i++}`);
-      params.push(active === 'true');
-    }
-
-    const sql = `
-      SELECT id, title, description, active, position, default_macro,
-             created_at, updated_at
-      FROM macros
-      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-      ORDER BY position ASC NULLS LAST, updated_at DESC NULLS LAST
-      LIMIT ${L} OFFSET ${O}
-    `;
-
-    const { rows } = await q(sql, params);
-    res.json({ rows, limit: L, offset: O });
-  } catch (err) {
-    console.error('macros.list error:', err);
-    res.status(500).json({ error: 'DB error' });
-  }
-});
-
 // ===================================================
-//  Global Error Handler (prevents raw 500s)
+//  Global Error Handler
 // ===================================================
 app.use((err, _req, res, _next) => {
   const code = err?.status || 500;
