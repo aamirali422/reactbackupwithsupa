@@ -6,14 +6,24 @@ import cookieParser from 'cookie-parser';
 import serverless from 'serverless-http';
 import pg from 'pg';
 
-// ===================================================
-//  Global flags
-// ===================================================
+// ---------------------------------------------------
+// Crash guards: surface any runtime crashes in logs
+// ---------------------------------------------------
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', err?.stack || err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.stack || err);
+});
+
+// ---------------------------------------------------
+// Env flags
+// ---------------------------------------------------
 const isProd = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
 
-// ===================================================
-//  DB (self-signed SSL fix + pool)
-// ===================================================
+// ---------------------------------------------------
+// DB: lazy pool (avoid connect at import/cold start)
+// ---------------------------------------------------
 process.env.NODE_TLS_REJECT_UNAUTHORIZED =
   process.env.NODE_TLS_REJECT_UNAUTHORIZED || '0';
 
@@ -26,23 +36,40 @@ function normalizeDatabaseUrl(v) {
   }
   return s;
 }
-const { Pool } = pg;
-const RAW_DB_URL = process.env.DATABASE_URL;
-const DB_URL = normalizeDatabaseUrl(RAW_DB_URL);
-const pool = new Pool({
-  connectionString: DB_URL,
-  ssl: { rejectUnauthorized: false },
-});
-pool.on('error', (err) => console.error('Unexpected PG idle client error:', err));
-const q = (text, params) => pool.query(text, params);
 
-// ===================================================
-//  App + Middleware
-// ===================================================
+const { Pool } = pg;
+const RAW_DB_URL = process.env.DATABASE_URL || '';
+const DB_URL = normalizeDatabaseUrl(RAW_DB_URL);
+
+let _pool = null;
+function getPool() {
+  if (!_pool) {
+    _pool = new Pool({
+      connectionString: DB_URL,
+      ssl: { rejectUnauthorized: false },
+      // optional: keep pool tiny on serverless
+      max: 2,
+      idleTimeoutMillis: 5_000,
+      connectionTimeoutMillis: 10_000,
+    });
+    _pool.on('error', (err) => {
+      console.error('Unexpected PG idle client error:', err);
+    });
+  }
+  return _pool;
+}
+async function q(text, params) {
+  const pool = getPool();
+  return pool.query(text, params);
+}
+
+// ---------------------------------------------------
+// App & CORS
+// ---------------------------------------------------
 const app = express();
 
 const ALLOWED_ORIGINS = [
-  process.env.FRONTEND_ORIGIN,                 // prod origin on Vercel
+  process.env.FRONTEND_ORIGIN,
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ].filter(Boolean);
@@ -52,8 +79,9 @@ const norm = (s) => String(s || '').replace(/\/+$/, '');
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!isProd) return cb(null, true); // allow all in dev
-      if (!origin) return cb(null, true); // same-origin or curl
+      // Same-origin requests from Vercel won't send an Origin header
+      if (!isProd) return cb(null, true);
+      if (!origin) return cb(null, true);
       const ok = ALLOWED_ORIGINS.some((o) => norm(origin) === norm(o));
       return cb(ok ? null : new Error(`CORS blocked: ${origin}`), ok);
     },
@@ -64,12 +92,15 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
-// Health (under /api for proxy + prod)
+// ---------------------------------------------------
+// Health & ping (no cookies/DB)
+// ---------------------------------------------------
 app.get('/api/healthz', (_req, res) => res.json({ ok: true }));
+app.get('/api/internal/ping', (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// ===================================================
-//  Cookie helpers (for internal admin auth)
-// ===================================================
+// ---------------------------------------------------
+// Cookie helpers (internal admin auth)
+// ---------------------------------------------------
 const COOKIE_NAME = 'int';
 
 function base64urlEncode(str) {
@@ -84,7 +115,6 @@ function base64urlDecode(b64u) {
   const b64 = b64u.replace(/-/g, '+').replace(/_/g, '/') + pad;
   return Buffer.from(b64, 'base64').toString('utf8');
 }
-
 function setSessionCookie(res, session, { days = 30 } = {}) {
   const value = base64urlEncode(JSON.stringify(session));
   res.cookie(COOKIE_NAME, value, {
@@ -102,10 +132,9 @@ function getSessionFromCookie(req) {
   catch { return null; }
 }
 
-// ===================================================
-//  Internal Admin Auth (single-file)
-//  Routes: /api/internal/login|session|logout
-// ===================================================
+// ---------------------------------------------------
+// Internal Admin Auth
+// ---------------------------------------------------
 const INTERNAL_USER = {
   email: process.env.INTERNAL_USER_EMAIL || 'backup@mahimediasolutions.com',
   password: process.env.INTERNAL_USER_PASSWORD || 'mahimediasolutions',
@@ -113,8 +142,9 @@ const INTERNAL_USER = {
 };
 
 app.use((req, _res, next) => {
-  if (req.path.startsWith('/api/internal'))
+  if (req.path.startsWith('/api/internal')) {
     console.log(`[INT] ${req.method} ${req.path}`);
+  }
   next();
 });
 
@@ -152,15 +182,16 @@ app.post('/api/internal/logout', (req, res) => {
   return res.json({ ok: true });
 });
 
-// ===================================================
-//  Session guard for /api/internal/* (except auth endpoints)
-// ===================================================
+// ---------------------------------------------------
+// Session guard (protect data routes)
+// ---------------------------------------------------
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/internal')) return next();
   if (
     req.path.startsWith('/api/internal/login') ||
     req.path.startsWith('/api/internal/session') ||
-    req.path.startsWith('/api/internal/logout')
+    req.path.startsWith('/api/internal/logout') ||
+    req.path.startsWith('/api/internal/ping')
   ) return next();
 
   const s = getSessionFromCookie(req);
@@ -168,15 +199,14 @@ app.use((req, res, next) => {
   return next();
 });
 
-// ===================================================
-//  Data Routes (single-file) under /api/internal/*
-// ===================================================
+// ---------------------------------------------------
+// Data routes (tickets/users/organizations/views/triggers/categories/macros)
+// ---------------------------------------------------
 
-// ---- TICKETS -------------------------------------------------
+// ---- TICKETS
 app.get('/api/internal/tickets', async (req, res) => {
   const search = String(req.query.q || '').trim().toLowerCase();
   const limit = Math.min(200, parseInt(req.query.limit, 10) || 100);
-
   let sql = `
     SELECT id, subject, description, status, priority, type,
            requester_id, assignee_id, organization_id,
@@ -184,31 +214,23 @@ app.get('/api/internal/tickets', async (req, res) => {
     FROM tickets
   `;
   const params = [];
-
   if (search) {
     params.push(`%${search}%`);
-    sql += `
-      WHERE LOWER(subject) LIKE $1
-         OR CAST(id AS TEXT) LIKE $1
-    `;
+    sql += ` WHERE LOWER(subject) LIKE $1 OR CAST(id AS TEXT) LIKE $1 `;
   }
-
   sql += ` ORDER BY updated_at DESC NULLS LAST, id DESC LIMIT ${limit}`;
-
   try {
     const { rows } = await q(sql, params);
-    console.log('GET /api/internal/tickets ->', rows.length, 'rows');
     res.json({ rows, limit });
   } catch (err) {
-  console.error('GET /api/internal/tickets error:', err);
-  res.status(500).json({ error: 'DB query failed', detail: String(err?.message || err) });
-}
+    console.error('tickets.list error:', err);
+    res.status(500).json({ error: 'DB query failed', detail: String(err?.message || err) });
+  }
 });
 
 app.get('/api/internal/tickets/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad ticket id' });
-
   try {
     const tRs = await q(
       `
@@ -229,144 +251,72 @@ app.get('/api/internal/tickets/:id', async (req, res) => {
     );
     if (tRs.rowCount === 0) return res.status(404).json({ error: 'Ticket not found' });
 
-    const comments = (
-      await q(
-        `
-        SELECT id, ticket_id, author_id, public, body, created_at, updated_at
-        FROM ticket_comments
-        WHERE ticket_id = $1
-        ORDER BY created_at ASC
-        `,
-        [id]
-      )
-    ).rows;
+    const comments = (await q(
+      `SELECT id, ticket_id, author_id, public, body, created_at, updated_at
+       FROM ticket_comments WHERE ticket_id = $1 ORDER BY created_at ASC`,
+      [id]
+    )).rows;
 
-    const attachments = (
-      await q(
-        `
-        SELECT id, ticket_id, comment_id, file_name, content_url, local_path,
-               content_type, size, created_at
-        FROM attachments
-        WHERE ticket_id = $1
-        ORDER BY created_at ASC
-        `,
-        [id]
-      )
-    ).rows;
+    const attachments = (await q(
+      `SELECT id, ticket_id, comment_id, file_name, content_url, local_path,
+              content_type, size, created_at
+       FROM attachments WHERE ticket_id = $1 ORDER BY created_at ASC`,
+      [id]
+    )).rows;
 
     res.json({ ticket: tRs.rows[0], comments, attachments });
   } catch (err) {
-  console.error('GET /api/internal/tickets error:', err);
-  res.status(500).json({ error: 'DB query failed', detail: String(err?.message || err) });
-}
+    console.error('tickets.detail error:', err);
+    res.status(500).json({ error: 'DB query failed', detail: String(err?.message || err) });
+  }
 });
 
 app.get('/api/internal/tickets/:id/attachments', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad ticket id' });
   try {
-    const rows = (
-      await q(
-        `
-        SELECT id, ticket_id, comment_id, file_name, content_url, local_path,
-               content_type, size, created_at
-        FROM attachments
-        WHERE ticket_id = $1
-        ORDER BY created_at ASC
-        `,
-        [id]
-      )
-    ).rows;
+    const rows = (await q(
+      `SELECT id, ticket_id, comment_id, file_name, content_url, local_path,
+              content_type, size, created_at
+       FROM attachments WHERE ticket_id = $1 ORDER BY created_at ASC`,
+      [id]
+    )).rows;
     res.json({ rows });
- } catch (err) {
-  console.error('GET /api/internal/tickets error:', err);
-  res.status(500).json({ error: 'DB query failed', detail: String(err?.message || err) });
-}
+  } catch (err) {
+    console.error('tickets.attachments error:', err);
+    res.status(500).json({ error: 'DB query failed', detail: String(err?.message || err) });
+  }
 });
 
-// ---- USERS ---------------------------------------------------
+// ---- USERS
 app.get('/api/internal/users', async (req, res) => {
   const search = String(req.query.q || '').trim().toLowerCase();
   const limit = Math.min(200, parseInt(req.query.limit, 10) || 100);
-
-  let sql = `
-    SELECT id, name, email, role, active, created_at, updated_at
-    FROM users
-  `;
+  let sql = `SELECT id, name, email, role, active, created_at, updated_at FROM users`;
   const params = [];
   if (search) {
     params.push(`%${search}%`);
-    sql += `
-      WHERE LOWER(name) LIKE $1
-         OR LOWER(email) LIKE $1
-         OR CAST(id AS TEXT) LIKE $1
-    `;
+    sql += ` WHERE LOWER(name) LIKE $1 OR LOWER(email) LIKE $1 OR CAST(id AS TEXT) LIKE $1 `;
   }
   sql += ` ORDER BY updated_at DESC NULLS LAST LIMIT ${limit}`;
-
   try {
     const { rows } = await q(sql, params);
-    console.log('GET /api/internal/users ->', rows.length, 'rows');
     res.json({ rows, limit });
   } catch (e) {
-    console.error('GET /api/internal/users error:', e);
+    console.error('users.list error:', e);
     res.status(500).json({ error: 'DB error' });
   }
 });
 
-// ---- MACROS --------------------------------------------------
-app.get('/api/internal/macros', async (req, res) => {
-  try {
-    const search = (req.query.q || '').toString().trim().toLowerCase();
-    const active = (req.query.active || '').toString().trim();
-    const L = Math.min(parseInt(req.query.limit, 10) || 100, 500);
-    const O = Math.max(parseInt(req.query.offset, 10) || 0, 0);
-
-    const where = [];
-    const params = [];
-    let i = 1;
-
-    if (search) {
-      where.push(`LOWER(title) LIKE $${i++}`);
-      params.push(`%${search}%`);
-    }
-    if (active) {
-      where.push(`active = $${i++}`);
-      params.push(active === 'true');
-    }
-
-    const sql = `
-      SELECT id, title, description, active, position, default_macro,
-             created_at, updated_at
-      FROM macros
-      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-      ORDER BY position ASC NULLS LAST, updated_at DESC NULLS LAST
-      LIMIT ${L} OFFSET ${O}
-    `;
-
-    const { rows } = await q(sql, params);
-    console.log('GET /api/internal/macros ->', rows.length, 'rows');
-    res.json({ rows, limit: L, offset: O });
-  } catch (err) {
-    console.error('macros.list error:', err);
-    res.status(500).json({ error: 'DB error' });
-  }
-});
-
-// ---- ORGANIZATIONS -------------------------------------------
+// ---- ORGANIZATIONS
 app.get('/api/internal/organizations', async (req, res) => {
   try {
     const search = (req.query.q || '').toString().trim().toLowerCase();
     const L = Math.min(parseInt(req.query.limit, 10) || 100, 500);
     const O = Math.max(parseInt(req.query.offset, 10) || 0, 0);
-
     const params = [];
     const where = [];
-    if (search) {
-      params.push(`%${search}%`);
-      where.push('LOWER(name) LIKE $1');
-    }
-
+    if (search) { params.push(`%${search}%`); where.push('LOWER(name) LIKE $1'); }
     const sql = `
       SELECT id, name, external_id, created_at, updated_at
       FROM organizations
@@ -374,7 +324,6 @@ app.get('/api/internal/organizations', async (req, res) => {
       ORDER BY updated_at DESC NULLS LAST
       LIMIT ${L} OFFSET ${O}
     `;
-
     const { rows } = await q(sql, params);
     res.json({ rows, limit: L, offset: O });
   } catch (err) {
@@ -383,21 +332,15 @@ app.get('/api/internal/organizations', async (req, res) => {
   }
 });
 
-// ---- VIEWS ---------------------------------------------------
+// ---- VIEWS
 app.get('/api/internal/views', async (req, res) => {
   try {
     const search = (req.query.q || '').toString().trim().toLowerCase();
     const L = Math.min(parseInt(req.query.limit, 10) || 100, 500);
     const O = Math.max(parseInt(req.query.offset, 10) || 0, 0);
-
     const params = [];
     const where = [];
-
-    if (search) {
-      where.push('LOWER(title) LIKE $1');
-      params.push(`%${search}%`);
-    }
-
+    if (search) { where.push('LOWER(title) LIKE $1'); params.push(`%${search}%`); }
     const sql = `
       SELECT id, title, description, active, position, default_view,
              created_at, updated_at
@@ -406,7 +349,6 @@ app.get('/api/internal/views', async (req, res) => {
       ORDER BY position ASC NULLS LAST, updated_at DESC NULLS LAST
       LIMIT ${L} OFFSET ${O}
     `;
-
     const { rows } = await q(sql, params);
     res.json({ rows, limit: L, offset: O });
   } catch (err) {
@@ -415,7 +357,7 @@ app.get('/api/internal/views', async (req, res) => {
   }
 });
 
-// ---- TRIGGERS ------------------------------------------------
+// ---- TRIGGERS
 app.get('/api/internal/triggers', async (req, res) => {
   try {
     const search = (req.query.q || '').toString().trim().toLowerCase();
@@ -428,18 +370,9 @@ app.get('/api/internal/triggers', async (req, res) => {
     const params = [];
     let i = 1;
 
-    if (search) {
-      where.push(`LOWER(title) LIKE $${i++}`);
-      params.push(`%${search}%`);
-    }
-    if (categoryId) {
-      where.push(`category_id = $${i++}`);
-      params.push(categoryId);
-    }
-    if (active) {
-      where.push(`active = $${i++}`);
-      params.push(active === 'true');
-    }
+    if (search) { where.push(`LOWER(title) LIKE $${i++}`); params.push(`%${search}%`); }
+    if (categoryId) { where.push(`category_id = $${i++}`); params.push(categoryId); }
+    if (active) { where.push(`active = $${i++}`); params.push(active === 'true'); }
 
     const sql = `
       SELECT id, title, description, active, position, category_id, raw_title,
@@ -449,7 +382,6 @@ app.get('/api/internal/triggers', async (req, res) => {
       ORDER BY position ASC NULLS LAST, updated_at DESC NULLS LAST
       LIMIT ${L} OFFSET ${O}
     `;
-
     const { rows } = await q(sql, params);
     res.json({ rows, limit: L, offset: O });
   } catch (err) {
@@ -458,21 +390,15 @@ app.get('/api/internal/triggers', async (req, res) => {
   }
 });
 
-// ---- TRIGGER CATEGORIES --------------------------------------
+// ---- TRIGGER CATEGORIES
 app.get('/api/internal/trigger-categories', async (req, res) => {
   try {
     const search = (req.query.q || '').toString().trim().toLowerCase();
     const L = Math.min(parseInt(req.query.limit, 10) || 100, 500);
     const O = Math.max(parseInt(req.query.offset, 10) || 0, 0);
-
     const where = [];
     const params = [];
-
-    if (search) {
-      where.push('LOWER(name) LIKE $1');
-      params.push(`%${search}%`);
-    }
-
+    if (search) { where.push('LOWER(name) LIKE $1'); params.push(`%${search}%`); }
     const sql = `
       SELECT id, name, position, created_at, updated_at
       FROM trigger_categories
@@ -480,7 +406,6 @@ app.get('/api/internal/trigger-categories', async (req, res) => {
       ORDER BY position ASC NULLS LAST, updated_at DESC NULLS LAST
       LIMIT ${L} OFFSET ${O}
     `;
-
     const { rows } = await q(sql, params);
     res.json({ rows, limit: L, offset: O });
   } catch (err) {
@@ -489,9 +414,40 @@ app.get('/api/internal/trigger-categories', async (req, res) => {
   }
 });
 
-// ===================================================
-//  Global Error Handler
-// ===================================================
+// ---- MACROS
+app.get('/api/internal/macros', async (req, res) => {
+  try {
+    const search = (req.query.q || '').toString().trim().toLowerCase();
+    const active = (req.query.active || '').toString().trim();
+    const L = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+    const O = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const where = [];
+    const params = [];
+    let i = 1;
+
+    if (search) { where.push(`LOWER(title) LIKE $${i++}`); params.push(`%${search}%`); }
+    if (active) { where.push(`active = $${i++}`); params.push(active === 'true'); }
+
+    const sql = `
+      SELECT id, title, description, active, position, default_macro,
+             created_at, updated_at
+      FROM macros
+      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      ORDER BY position ASC NULLS LAST, updated_at DESC NULLS LAST
+      LIMIT ${L} OFFSET ${O}
+    `;
+    const { rows } = await q(sql, params);
+    res.json({ rows, limit: L, offset: O });
+  } catch (err) {
+    console.error('macros.list error:', err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+// ---------------------------------------------------
+// Global error handler
+// ---------------------------------------------------
 app.use((err, _req, res, _next) => {
   const code = err?.status || 500;
   const msg = err?.message || 'Internal Server Error';
@@ -499,21 +455,9 @@ app.use((err, _req, res, _next) => {
   res.status(code).json({ error: msg });
 });
 
-// ===================================================
-//  DB check on boot
-// ===================================================
-(async () => {
-  try {
-    await pool.query('select 1');
-    console.log('✅ Postgres connected (serverless)');
-  } catch (e) {
-    console.error('❌ Postgres connection error (serverless):', e.message);
-  }
-})();
-
-// ===================================================
-//  Export for Vercel + local runner
-// ===================================================
+// ---------------------------------------------------
+// Export for Vercel + local dev
+// ---------------------------------------------------
 export const config = { api: { bodyParser: false } };
 export default serverless(app);
 
@@ -521,6 +465,5 @@ if (process.env.VERCEL !== '1') {
   const PORT = process.env.PORT || 4000;
   app.listen(PORT, () => {
     console.log(`Local API running on http://localhost:${PORT}`);
-    console.log('Try:  curl http://localhost:4000/api/healthz');
   });
 }
