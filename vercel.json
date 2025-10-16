@@ -1,11 +1,16 @@
 {
   "version": 2,
-  "builds": [
-    { "src": "api/**/*.js", "use": "@vercel/node@2" },
-    { "src": "package.json", "use": "@vercel/static-build@1", "config": { "distDir": "dist" } }
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "framework": "vite",
+  "rewrites": [
+    { "source": "/((?!api).*)", "destination": "/index.html" }
   ],
-  "routes": [
-    { "src": "^/api/(.*)$", "dest": "/api/$1" },
-    { "src": "^(?!/api/).*", "dest": "/index.html" }
-  ]
+  "functions": {
+    "api/index.js": {
+      "runtime": "nodejs20.x",
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  }
 }
